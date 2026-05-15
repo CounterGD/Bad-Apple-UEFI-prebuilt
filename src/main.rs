@@ -114,11 +114,11 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
         decoder.decode_into(&mut pixels).unwrap();
 
         let colorspace = decoder.get_colorspace().unwrap();
-        let (channels, resize_pixel_type) = match colorspace {
-            ColorSpace::RGB => (3, resize::Pixel::RGB8),
-            ColorSpace::RGBA => (4, resize::Pixel::RGBA8),
-            ColorSpace::Luma => (1, resize::Pixel::Gray8),
-            ColorSpace::LumaA => (2, resize::Pixel::GrayAlpha8),
+        let channels = match colorspace {
+            ColorSpace::RGB => 3,
+            ColorSpace::RGBA => 4,
+            ColorSpace::Luma => 1,
+            ColorSpace::LumaA => 2,
             _ => {
                 // Unsupported pixel type, skip frame
                 elapsed_ms += TARGET_FRAMERATE_MS;
@@ -130,7 +130,7 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
             let info = decoder.get_info().unwrap();
             let dims = (info.width, info.height);
 
-            // Actually match raw pixels slice bound size to what the decoder dumped
+            // Match raw pixels slice bound size to what the decoder dumped
             pixels.resize(dims.0 * dims.1 * channels, 0u8);
             dims
         };
@@ -138,18 +138,24 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
         // Resize output buffer layout to cleanly map current channel count constraints
         scaled_buffer.resize(scaled_width * scaled_height * channels, 0u8);
 
-        // Setup a strict no_std safe Resizer stream (using fast Triangle filter for speed)
-        let mut resizer = resize::new(
-            original_width,
-            original_height,
-            scaled_width,
-            scaled_height,
-            resize_pixel_type,
-            resize::Type::Triangle,
-        )
-        .unwrap();
-
-        resizer.resize(&pixels, &mut scaled_buffer).unwrap();
+        // Dispatch to the strict type-safe resizer helper function
+        let resize_status = match colorspace {
+            ColorSpace::RGB => resize_frame::<resize::formats::Rgb<u8, u8>>(
+                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ),
+            ColorSpace::RGBA => resize_frame::<resize::formats::Rgba<u8, u8>>(
+                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ),
+            ColorSpace::Luma => resize_frame::<resize::formats::Gray<u8>>(
+                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ),
+            ColorSpace::LumaA => resize_frame::<resize::formats::GrayAlpha<u8>>(
+                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ),
+            _ => unreachable!(),
+        };
+        
+        resize_status.unwrap();
 
         let content = (0..scaled_height).flat_map(|y| {
             let pixels_inner = &scaled_buffer;
@@ -228,6 +234,23 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
     } else {
         uefi::Status::SUCCESS
     }
+}
+
+/// Helper function to encapsulate type-specific resizing rules cleanly
+fn resize_frame<P>(
+    src_w: usize,
+    src_h: usize,
+    dst_w: usize,
+    dst_h: usize,
+    src: &[u8],
+    dst: &mut [u8],
+) -> Result<(), resize::errors::Error>
+where
+    P: resize::Pixel + Copy,
+    [P]: resize::PixelFormat,
+{
+    let mut resizer = resize::new(src_w, src_h, dst_w, dst_h, resize::Type::Triangle)?;
+    resizer.resize(src, dst)
 }
 
 #[cfg(not(feature = "qemu"))]
