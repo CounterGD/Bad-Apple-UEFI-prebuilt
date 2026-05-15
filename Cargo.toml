@@ -15,6 +15,7 @@ qemu = ["uefi/qemu"]
 
 [dependencies]
 uefi = "0.36.1"
+[dependencies]
 thiserror = { version = "2.0.17", default-features = false }
 zune-png = { version = "0.4.10", default-features = false }
 resize = { version = "0.8.8", features = ["no_std"], default-features = false }
