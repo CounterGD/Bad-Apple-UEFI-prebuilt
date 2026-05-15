@@ -1,0 +1,47 @@
+name: Compile Linux from Source
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout local repository configs/assets
+        uses: actions/checkout@v4
+
+      - name: Install toolchain dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc git cpio rsync kmod lz4 xz-utils imagemagick
+
+      - name: Fetch Kernel Source
+        run: |
+          git clone --depth=1 --branch v7.1-rc1 https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git kernel-source
+
+      - name: Configure and Build
+        run: |
+          cd kernel-source
+          
+          # 1. Generate default configuration
+          make defconfig
+          
+          # 2. Programmatically tweak features (e.g., SquashFS + XATTR for compressed rootfs architectures)
+          scripts/config --enable CONFIG_SQUASHFS
+          scripts/config --enable CONFIG_SQUASHFS_XATTR
+          scripts/config --enable CONFIG_SQUASHFS_ZLIB
+          scripts/config --enable CONFIG_SQUASHFS_LZ4
+          
+          # Apply the config changes cleanly
+          make olddefconfig
+          
+          # 3. Build the kernel image using all available runner cores
+          make -j$(nproc) bzImage
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiled-bzImage
+          path: kernel-source/arch/x86_64/boot/bzImage
+
