@@ -35,3 +35,5 @@ cargo xtask qemu-run
 
 ### Precompiled
 Soon.
+
+(from CounterGD: I made a prebuilt ver of this)
