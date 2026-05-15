@@ -7,8 +7,6 @@ use alloc::vec;
 use core::ffi::c_void;
 use core::fmt::Write;
 
-use fast_image_resize::images::Image;
-use fast_image_resize::{PixelType, Resizer};
 use uefi::{boot, table, Handle, Status};
 use zune_png::zune_core::colorspace::ColorSpace;
 use zune_png::zune_core::options::DecoderOptions;
@@ -89,16 +87,13 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
         midi.parse().unwrap()
     };
 
-    // PERF: We allocate this buffers once, and set their sizes on the initial frame,
-    // then reuse them for the rest of the frames. Since we do not know the number of
-    // channels, we assume the maximum possible channel count initially
-    const LARGEST_PIXEL_TYPE: PixelType = PixelType::U8x4;
+    // PERF: Max 4 channels (RGBA) for initial pre-allocations to avoid resizing loop penalties
+    const MAX_CHANNELS: usize = 4;
     let scaled_width = display.width;
     let scaled_height = display.height;
 
-    let mut pixels = vec![0u8; display.width * display.height * LARGEST_PIXEL_TYPE.size()];
-    let mut scaled = Image::new(scaled_width as u32, scaled_height as u32, LARGEST_PIXEL_TYPE);
-    let mut resizer = Resizer::new();
+    let mut pixels = vec![0u8; display.width * display.height * MAX_CHANNELS];
+    let mut scaled_buffer = vec![0u8; scaled_width * scaled_height * MAX_CHANNELS];
 
     // NOTE: UEFI runtime services times are sometimes very inaccurate, so we track it
     // ourselves
@@ -119,10 +114,11 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
         decoder.decode_into(&mut pixels).unwrap();
 
         let colorspace = decoder.get_colorspace().unwrap();
-        let pixel_type = match colorspace {
-            ColorSpace::RGB => PixelType::U8x3,
-            ColorSpace::RGBA => PixelType::U8x4,
-            ColorSpace::Luma => PixelType::U8,
+        let (channels, resize_pixel_type) = match colorspace {
+            ColorSpace::RGB => (3, resize::Pixel::RGB8),
+            ColorSpace::RGBA => (4, resize::Pixel::RGBA8),
+            ColorSpace::Luma => (1, resize::Pixel::Gray8),
+            ColorSpace::LumaA => (2, resize::Pixel::GrayAlpha8),
             _ => {
                 // Unsupported pixel type, skip frame
                 elapsed_ms += TARGET_FRAMERATE_MS;
@@ -130,59 +126,52 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
             }
         };
 
-        if scaled.pixel_type() != pixel_type {
-            // Should only reallocate for the first frame, in case our assumption isn't true
-            scaled = Image::new(scaled_width as u32, scaled_height as u32, pixel_type);
-        }
-
         let (original_width, original_height) = {
             let info = decoder.get_info().unwrap();
             let dims = (info.width, info.height);
 
-            // Actually resize the buffer if required
-            pixels.resize(dims.0 * dims.1 * pixel_type.size(), 0u8);
+            // Actually match raw pixels slice bound size to what the decoder dumped
+            pixels.resize(dims.0 * dims.1 * channels, 0u8);
             dims
         };
 
-        // TODO: Detect SIMD support and fallback to basic implementation if unsupported
-        // Scale the image up
-        resizer
-            .resize(
-                &Image::from_slice_u8(
-                    original_width as u32,
-                    original_height as u32,
-                    pixels.as_mut_slice(),
-                    PixelType::U8x3,
-                )
-                .unwrap(),
-                &mut scaled,
-                None,
-            )
-            .unwrap();
+        // Resize output buffer layout to cleanly map current channel count constraints
+        scaled_buffer.resize(scaled_width * scaled_height * channels, 0u8);
+
+        // Setup a strict no_std safe Resizer stream (using fast Triangle filter for speed)
+        let mut resizer = resize::new(
+            original_width,
+            original_height,
+            scaled_width,
+            scaled_height,
+            resize_pixel_type,
+            resize::Type::Triangle,
+        )
+        .unwrap();
+
+        resizer.resize(&pixels, &mut scaled_buffer).unwrap();
 
         let content = (0..scaled_height).flat_map(|y| {
-            (0..scaled_width).map({
-                let pixels_inner = scaled.buffer();
-                move |x| {
-                    let idx = (y * scaled_width + x) * pixel_type.size();
-                    let pixel = match colorspace {
-                        ColorSpace::RGB | ColorSpace::RGBA => Color::Rgb(
-                            pixels_inner[idx],
-                            pixels_inner[idx + 1],
-                            pixels_inner[idx + 2],
-                        ),
-                        ColorSpace::Luma | ColorSpace::LumaA => {
-                            let gray = pixels_inner[idx];
-                            Color::Rgb(gray, gray, gray)
-                        }
-                        _ => Color::default(),
-                    };
+            let pixels_inner = &scaled_buffer;
+            (0..scaled_width).map(move |x| {
+                let idx = (y * scaled_width + x) * channels;
+                let pixel = match colorspace {
+                    ColorSpace::RGB | ColorSpace::RGBA => Color::Rgb(
+                        pixels_inner[idx],
+                        pixels_inner[idx + 1],
+                        pixels_inner[idx + 2],
+                    ),
+                    ColorSpace::Luma | ColorSpace::LumaA => {
+                        let gray = pixels_inner[idx];
+                        Color::Rgb(gray, gray, gray)
+                    }
+                    _ => Color::default(),
+                };
 
-                    // No need to two tone map for a "retro" feeling on high res mode
-                    #[cfg(not(feature = "high_res"))]
-                    let pixel = pixel.to_two_tone(Color::Gray, Color::WHITE, 160);
-                    (x, y, pixel)
-                }
+                // No need to two tone map for a "retro" feeling on high res mode
+                #[cfg(not(feature = "high_res"))]
+                let pixel = pixel.to_two_tone(Color::Gray, Color::WHITE, 160);
+                (x, y, pixel)
             })
         });
 
@@ -254,3 +243,4 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         core::hint::spin_loop();
     }
 }
+
