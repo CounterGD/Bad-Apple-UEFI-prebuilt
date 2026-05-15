@@ -138,24 +138,28 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
         // Resize output buffer layout to cleanly map current channel count constraints
         scaled_buffer.resize(scaled_width * scaled_height * channels, 0u8);
 
-        // Dispatch to the strict type-safe resizer helper function
+        // Dispatch to the type-safe resizer helper function
         let resize_status = match colorspace {
-            ColorSpace::RGB => resize_frame::<resize::formats::Rgb<u8, u8>>(
-                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ColorSpace::RGB => resize_frame(
+                original_width, original_height, scaled_width, scaled_height, 
+                resize::Pixel::RGB8, &pixels, &mut scaled_buffer
             ),
-            ColorSpace::RGBA => resize_frame::<resize::formats::Rgba<u8, u8>>(
-                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ColorSpace::RGBA => resize_frame(
+                original_width, original_height, scaled_width, scaled_height, 
+                resize::Pixel::RGBA8, &pixels, &mut scaled_buffer
             ),
-            ColorSpace::Luma => resize_frame::<resize::formats::Gray<u8>>(
-                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ColorSpace::Luma => resize_frame(
+                original_width, original_height, scaled_width, scaled_height, 
+                resize::Pixel::Gray8, &pixels, &mut scaled_buffer
             ),
-            ColorSpace::LumaA => resize_frame::<resize::formats::GrayAlpha<u8>>(
-                original_width, original_height, scaled_width, scaled_height, &pixels, &mut scaled_buffer
+            ColorSpace::LumaA => resize_frame(
+                original_width, original_height, scaled_width, scaled_height, 
+                resize::Pixel::GrayA8, &pixels, &mut scaled_buffer
             ),
             _ => unreachable!(),
         };
         
-        resize_status.unwrap();
+        resize_status.expect("Failed to resize frame");
 
         let content = (0..scaled_height).flat_map(|y| {
             let pixels_inner = &scaled_buffer;
@@ -236,20 +240,17 @@ fn main_impl(internal_image_handle: Handle, internal_system_table: *const c_void
     }
 }
 
-/// Helper function to encapsulate type-specific resizing rules cleanly
-fn resize_frame<P>(
+/// Helper function to encapsulate resizing rules cleanly using the resize::Pixel enum
+fn resize_frame(
     src_w: usize,
     src_h: usize,
     dst_w: usize,
     dst_h: usize,
+    pixel_type: resize::Pixel,
     src: &[u8],
     dst: &mut [u8],
-) -> Result<(), resize::errors::Error>
-where
-    P: resize::Pixel + Copy,
-    [P]: resize::PixelFormat,
-{
-    let mut resizer = resize::new(src_w, src_h, dst_w, dst_h, resize::Type::Triangle)?;
+) -> Result<(), resize::Error> {
+    let mut resizer = resize::new(src_w, src_h, dst_w, dst_h, pixel_type, resize::Type::Triangle)?;
     resizer.resize(src, dst)
 }
 
